@@ -2694,10 +2694,14 @@ object SparkContext extends Logging {
         scheduler.initialize(backend)
         (backend, scheduler)
 
+        //spark提交模式中最常用的standalone模式
       case SPARK_REGEX(sparkUrl) =>
         val scheduler = new TaskSchedulerImpl(sc)
         val masterUrls = sparkUrl.split(",").map("spark://" + _)
+        //sanmusee: StandaloneSchedulerBackend以前的名字叫SparkDeployScheduler
         val backend = new StandaloneSchedulerBackend(scheduler, sc, masterUrls)
+
+        //sanmusee: taskScheduler已经创建完成，下面使用backend对其进行初始化
         scheduler.initialize(backend)
         (backend, scheduler)
 

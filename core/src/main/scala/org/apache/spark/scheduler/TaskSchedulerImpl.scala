@@ -58,6 +58,14 @@ import org.apache.spark.util.{AccumulatorV2, SystemClock, ThreadUtils, Utils}
  *      scheduling
  *   * task-result-getter threads
  */
+
+/**
+  * sanmusee:
+  * 1、底层通过操作一个SchedulerBankend对象，针对不同种类的cluster（standalone、yarn、mesos）来调度task。
+  * 2、也可以通过一个LocalSchedulerBackend，并且将isLocal参数设置为true，在本地模式下工作。
+  * 3、辅助负责处理一些通用逻辑，比如决定多个job的调度顺序，启动推测任务执行。
+  * 4、客户端首先调用initialize()和start()，然后通过runTask()方法提交TaskSet
+  * */
 private[spark] class TaskSchedulerImpl(
     val sc: SparkContext,
     val maxTaskFailures: Int,
@@ -150,6 +158,8 @@ private[spark] class TaskSchedulerImpl(
         throw new SparkException(s"Unrecognized $SCHEDULER_MODE_PROPERTY: $schedulingModeConf")
     }
 
+  // sanmusee: 之前版本是在initialize()方法中初始化rootPool的
+  // 调度池
   val rootPool: Pool = new Pool("", schedulingMode, 0, 0)
 
   // This is a var so that we can reset it for testing purposes.
@@ -172,9 +182,14 @@ private[spark] class TaskSchedulerImpl(
     this.dagScheduler = dagScheduler
   }
 
+  /**
+    * sanmusee: 之前版本是在initialize方法中初始化rootPool的，现在是将rootPool维护成成员字段了
+    * 在类初始化时就生成了Pool
+    */
   def initialize(backend: SchedulerBackend) {
     this.backend = backend
     schedulableBuilder = {
+      //sanmusee: 根据调度模式决定，根据是何种调度算法，创建对应的SchedulableBuilder
       schedulingMode match {
         case SchedulingMode.FIFO =>
           new FIFOSchedulableBuilder(rootPool)
@@ -182,9 +197,10 @@ private[spark] class TaskSchedulerImpl(
           new FairSchedulableBuilder(rootPool, conf)
         case _ =>
           throw new IllegalArgumentException(s"Unsupported $SCHEDULER_MODE_PROPERTY: " +
-          s"$schedulingMode")
+            s"$schedulingMode")
       }
     }
+    //sanmusee: 最后通过SchedulableBuilder创建调度池
     schedulableBuilder.buildPools()
   }
 

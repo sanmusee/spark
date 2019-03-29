@@ -112,8 +112,14 @@ private[spark] class StandaloneSchedulerBackend(
       } else {
         None
       }
+
+    // sanmusee: ApplicationDescription描述了当前执行的app的一些情况
+    // 包括：app最大需要多少内存，需要多少cpu，每个slave上需要多少内存等
     val appDesc = ApplicationDescription(sc.appName, maxCores, sc.executorMemory, command,
       webUrl, sc.eventLogDir, sc.eventLogCodec, coresPerExecutor, initialExecutorLimit)
+
+    // sanmusee: StandaloneAppClient负责app和spark集群进行通信
+    // 根据master节点的url和一个ApplicationDescription对象和一个集群事件监听器，以及各事件的回调函数构造client
     client = new StandaloneAppClient(sc.env.rpcEnv, masters, appDesc, this, conf)
     client.start()
     launcherBackend.setState(SparkAppHandle.State.SUBMITTED)
