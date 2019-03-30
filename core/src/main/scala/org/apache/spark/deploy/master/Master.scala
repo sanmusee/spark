@@ -42,6 +42,9 @@ import org.apache.spark.rpc._
 import org.apache.spark.serializer.{JavaSerializer, Serializer}
 import org.apache.spark.util.{SparkUncaughtExceptionHandler, ThreadUtils, Utils}
 
+/**
+  * Master继承自ThreadSafeRpcEndpoint（是之前版本的Actor）
+  */
 private[deploy] class Master(
     override val rpcEnv: RpcEnv,
     address: RpcAddress,
@@ -221,6 +224,10 @@ private[deploy] class Master(
     self.send(RevokedLeadership)
   }
 
+  /** sanmusee:
+    * receive方法接收三大注册
+    * @return
+    */
   override def receive: PartialFunction[Any, Unit] = {
     case ElectedLeader =>
       val (storedApps, storedDrivers, storedWorkers) = persistenceEngine.readPersistedData(rpcEnv)
@@ -245,6 +252,7 @@ private[deploy] class Master(
       logError("Leadership has been revoked -- master shutting down.")
       System.exit(0)
 
+    // sanmusee: worker向master注册
     case RegisterWorker(
       id, workerHost, workerPort, workerRef, cores, memory, workerWebUiUrl, masterAddress) =>
       logInfo("Registering worker %s:%d with %d cores, %s RAM".format(
@@ -269,17 +277,25 @@ private[deploy] class Master(
         }
       }
 
+    // sanmusee: app向master注册
     case RegisterApplication(description, driver) =>
       // TODO Prevent repeated registrations from some driver
+      // sanmusee: 当前master如果是standByMaster，那么不会响应app的注册
       if (state == RecoveryState.STANDBY) {
         // ignore, don't send response
       } else {
+        // sanmusee: 当前master是ActiveMaster，只有ActiverMaster才响应app的注册
         logInfo("Registering app " + description.name)
+        // sanmusee: 根据用户使用submit提交应用时指定的配置参数来创建一个app对象
         val app = createApplication(description, driver)
+        // sanmusee: 创建好app对象后就对其注册，注册具体过程见下面这个方法内部
         registerApplication(app)
         logInfo("Registered app " + description.name + " with ID " + app.id)
+        // sanmusee: 使用持久化引擎对app进行持久化，持久化的实际是app的info
         persistenceEngine.addApplication(app)
+        // sanmusee: 反向向driver中的TaskScheduler中的Backend中的endPoint（类似于之前版本的ClientActor）发送消息
         driver.send(RegisteredApplication(app.id, self))
+        // sanmusee: 最后调用schedule()，app的注册过程结束
         schedule()
       }
 
@@ -847,17 +863,24 @@ private[deploy] class Master(
   }
 
   private def registerApplication(app: ApplicationInfo): Unit = {
+    // sanmusee: 判断dirver的地址是否已经存在，存在说明在重复注册，就直接返回
     val appAddress = app.driver.address
     if (addressToApp.contains(appAddress)) {
       logInfo("Attempted to re-register application at same address: " + appAddress)
       return
     }
 
+    // sanmusee: 以下过程都是将app加入内存缓存的过程
     applicationMetricsSystem.registerSource(app.appSource)
+    // sanmusee: apps是一个hashSet，可去重；将app对象加到内存缓存中
     apps += app
+    // sanmusee: app的id与app的映射关系
     idToApp(app.id) = app
+    // sanmusee: app的driver与app的映射关系
     endpointToApp(app.driver) = app
+    // sanmusee: app的地址与app的映射关系
     addressToApp(appAddress) = app
+    // sanmusee: 将app对象加入到待调度队列中
     waitingApps += app
   }
 
