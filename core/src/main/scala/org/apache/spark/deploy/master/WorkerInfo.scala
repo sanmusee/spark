@@ -85,6 +85,11 @@ private[spark] class WorkerInfo(
     executors.values.exists(_.application == app)
   }
 
+  /**
+    * sanmusee:
+    * 将driver加入到worker的缓存结构中（HashMap），将worker内已使用的内存和cpu数量都加上driver所需要的内存和cpu数量
+    * @param driver
+    */
   def addDriver(driver: DriverInfo) {
     drivers(driver.id) = driver
     memoryUsed += driver.desc.mem
