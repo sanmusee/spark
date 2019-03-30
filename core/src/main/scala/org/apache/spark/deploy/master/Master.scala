@@ -299,11 +299,15 @@ private[deploy] class Master(
         schedule()
       }
 
+    // sanmusee: 指定某一个app中的某个executor的状态改变为state参数指定的状态
     case ExecutorStateChanged(appId, execId, state, message, exitStatus) =>
+      // sanmusee: 根据appId找到app，再从app内部的executors中找到状态改变了的那个executor
       val execOption = idToApp.get(appId).flatMap(app => app.executors.get(execId))
       execOption match {
+        // sanmusee: 如果有值，即execOption被正确指向了状态改变的那个executor
         case Some(exec) =>
           val appInfo = idToApp(appId)
+          // sanmusee: 记录executor的旧状态，改变成新状态
           val oldState = exec.state
           exec.state = state
 
@@ -313,6 +317,7 @@ private[deploy] class Master(
             appInfo.resetRetryCount()
           }
 
+          // sanmusee: 向driver同步发送executor状态改变的信息
           exec.application.driver.send(ExecutorUpdated(execId, state, message, exitStatus, false))
 
           if (ExecutorState.isFinished(state)) {
@@ -320,9 +325,12 @@ private[deploy] class Master(
             logInfo(s"Removing executor ${exec.fullId} because it is $state")
             // If an application has already finished, preserve its
             // state to display its information properly on the UI
+            // sanmusee: 如果executor状态改变成已完成状态
             if (!appInfo.isFinished) {
+              // sanmusee: 从app的缓存中移除executor
               appInfo.removeExecutor(exec)
             }
+            // sanmusee: 从运行executor的worker的缓存中移除executor
             exec.worker.removeExecutor(exec)
 
             val normalExit = exitStatus == Some(0)
@@ -332,6 +340,8 @@ private[deploy] class Master(
             if (!normalExit
                 && appInfo.incrementRetryCount() >= maxExecutorRetries
                 && maxExecutorRetries >= 0) { // < 0 disables this application-killing path
+              // sanmusee: executor的退出状态如果是非正常的，并且重试次数上限了
+              // sanmusee: 说明app也执行失败了，就移除app，并置app的状态为Faild
               val execs = appInfo.executors.values
               if (!execs.exists(_.state == ExecutorState.RUNNING)) {
                 logError(s"Application ${appInfo.desc.name} with ID ${appInfo.id} failed " +
@@ -888,6 +898,9 @@ private[deploy] class Master(
     removeApplication(app, ApplicationState.FINISHED)
   }
 
+  /**
+    * sanmusee: 移除master中的app，清理掉各种内存缓存
+    */
   def removeApplication(app: ApplicationInfo, state: ApplicationState.Value) {
     if (apps.contains(app)) {
       logInfo("Removing app " + app.id)
@@ -1054,15 +1067,19 @@ private[deploy] class Master(
       driverId: String,
       finalState: DriverState,
       exception: Option[Exception]) {
+    // sanmusee: 使用scala的高阶函数find，找到driverId对应的driver
     drivers.find(d => d.id == driverId) match {
+        // sanmusee: Some代表有值，找到了
       case Some(driver) =>
         logInfo(s"Removing driver: $driverId")
+        // sanmusee: 将driver从内存缓存中移除
         drivers -= driver
         if (completedDrivers.size >= retainedDrivers) {
           val toRemove = math.max(retainedDrivers / 10, 1)
           completedDrivers.trimStart(toRemove)
         }
         completedDrivers += driver
+        // sanmusee: 去除driver的持久化信息
         persistenceEngine.removeDriver(driver)
         driver.state = finalState
         driver.exception = exception
