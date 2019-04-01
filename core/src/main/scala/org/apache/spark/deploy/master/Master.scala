@@ -225,7 +225,7 @@ private[deploy] class Master(
   }
 
   /** sanmusee:
-    * receive方法接收三大注册
+    * receive方法接收三大注册（worker、driver、application）
     * @return
     */
   override def receive: PartialFunction[Any, Unit] = {
@@ -638,17 +638,33 @@ private[deploy] class Master(
       app: ApplicationInfo,
       usableWorkers: Array[WorkerInfo],
       spreadOutApps: Boolean): Array[Int] = {
+    //sanmusee: 每个executor需要的cpu的个数（可能为空，即0个cpu）
     val coresPerExecutor = app.desc.coresPerExecutor
+    //sanmsuee: 如果为0，就取成1，1为每个executor默认的cpu数量
     val minCoresPerExecutor = coresPerExecutor.getOrElse(1)
+    //sanmusee: 如果没有指定executor需要多少个cpu，那就在一个worker上面只启动一个executor
     val oneExecutorPerWorker = coresPerExecutor.isEmpty
+    //sanmusee: 从用户submit提交的信息中读取每个executor需要多少内存
     val memoryPerExecutor = app.desc.memoryPerExecutorMB
+    //sanmusee: 集群中可用worker的数量
     val numUsable = usableWorkers.length
-    val assignedCores = new Array[Int](numUsable) // Number of cores to give to each worker
-    val assignedExecutors = new Array[Int](numUsable) // Number of new executors on each worker
+    //sanmusee: assignedCores数组用来记录已经在每个worker分配了多少个cpu
+    val assignedCores = new Array[Int](numUsable)
+    //sanmusee: assignedExecutors数组用来记录已经在每个worker上启动了多少个executor
+    val assignedExecutors = new Array[Int](numUsable)
+
+    /** sanmusee:
+      * app.coresLeft: app需要的cpu个数
+      * usableWorkers.map(_.coresFree).sum: 集群中所有可用worker的cpu总数
+      * 取最小值，比如app要求20个cpu，但是集群一共才15个cpu，那么就取15个cpu
+      */
+    //sanmusee: 该app一共需要分配的cpu的数量
     var coresToAssign = math.min(app.coresLeft, usableWorkers.map(_.coresFree).sum)
 
-    /** Return whether the specified worker can launch an executor for this app. */
+    /** sanmusee: 判断一个指定的worker能否为当前app启动一个executor*/
     def canLaunchExecutor(pos: Int): Boolean = {
+      // sanmusee: 如果coresToAssign为0了，即已经给app分配了app需要的那么多个cpu了，
+      // 说明该app已经不用再分配cpu，不用启动executor了，keepScheduling就为false，该方法会返回false
       val keepScheduling = coresToAssign >= minCoresPerExecutor
       val enoughCores = usableWorkers(pos).coresFree - assignedCores(pos) >= minCoresPerExecutor
 
@@ -667,35 +683,46 @@ private[deploy] class Master(
       }
     }
 
-    // Keep launching executors until no more workers can accommodate any
-    // more executors, or if we have reached this application's limits
+    //sanmusee: 从集群中所有硬件资源符合要求的alive态的worker中再次过滤出能够为当前app生成executor的那些worker
     var freeWorkers = (0 until numUsable).filter(canLaunchExecutor)
+
+    //sanmusee: 只要freeWorkers不为空，就对其进行foreach遍历，遍历完成之后如果仍然不为空，就再遍历一次，以此类推
     while (freeWorkers.nonEmpty) {
       freeWorkers.foreach { pos =>
         var keepScheduling = true
+        //sanmusee: 执行一次while就启动一个executor
         while (keepScheduling && canLaunchExecutor(pos)) {
+          //sanmusee: 当前app一共需要的core数量减去本次已为app分配的core的数量
           coresToAssign -= minCoresPerExecutor
+          //sanmusee: 更新记录本次foreach循环的那个worker上已经分配的core的数量
           assignedCores(pos) += minCoresPerExecutor
 
-          // If we are launching one executor per worker, then every iteration assigns 1 core
-          // to the executor. Otherwise, every iteration assigns cores to a new executor.
+          //sanmusee: 如果每个worker上只启动一个executor，将记录每个worker启动了多少个executor的数组对应值置为1，
+          //否则就 +1
           if (oneExecutorPerWorker) {
             assignedExecutors(pos) = 1
           } else {
             assignedExecutors(pos) += 1
           }
-
-          // Spreading out an application means spreading out its executors across as
-          // many workers as possible. If we are not spreading out, then we should keep
-          // scheduling executors on this worker until we use all of its resources.
-          // Otherwise, just move on to the next worker.
+          /**
+            * sanmusee: spreadOutApps = true 表示尽可能让app的executor分部得广一些，分部在越多的worker上面
+            * 所以将keepScheduling置为false，从而结束最内层的while循环，进而进入下一次foreach迭代，即取下一个worker
+            *
+            * 如果spreadOutApps = false， 就会把app的executor分布在尽量少的worker上，一旦取出某个worker，就会一直在这个
+            * worker上面分配executor，直到这个worker不能再为该app分配executo为止，即canLaunchExecutor(pos)返回false为止。
+            */
           if (spreadOutApps) {
             keepScheduling = false
           }
         }
       }
+      //sanmusee: 对集群中可用的freeWorkers遍历操作完一次后，再对freeWorkers过滤出仍然能够为该app分配executor的那些worker
+      //转入下一次freeWorkers遍历
+      //注意: 如果第一次freeWorkers遍历就为当前app分配了足够多的cpu和executor后，下面的过滤操作freeWorkers.filter(canLaunchExecutor)会
+      //把freeWorkers中的worker全部过滤掉，从而使freeWorkers.nonEmpty为true，结束最外层while循环
       freeWorkers = freeWorkers.filter(canLaunchExecutor)
     }
+    //sanmusee: scheduleExecutorsOnWorkers()方法为app分配完cpu和executor后，返回记录每个worker上分配cpu个数的数组
     assignedCores
   }
 
@@ -703,20 +730,22 @@ private[deploy] class Master(
    * Schedule and launch executors on workers
    */
   private def startExecutorsOnWorkers(): Unit = {
-    // Right now this is a very simple FIFO scheduler. We keep trying to fit in the first app
-    // in the queue, then the second app, etc.
+    // sanmusee: 遍历waitingApps中的ApplicationInfo
     for (app <- waitingApps) {
       val coresPerExecutor = app.desc.coresPerExecutor.getOrElse(1)
-      // If the cores left is less than the coresPerExecutor,the cores left will not be allocated
+      // sanmusee: 并且过滤出还有需要调度的core的Application
       if (app.coresLeft >= coresPerExecutor) {
-        // Filter out workers that don't have enough resources to launch an executor
+        // sanmusee: 过滤出alive的workers，并且内存和cpu都足够的worker。然后按照cpu的数量倒序排序
         val usableWorkers = workers.toArray.filter(_.state == WorkerState.ALIVE)
           .filter(worker => worker.memoryFree >= app.desc.memoryPerExecutorMB &&
             worker.coresFree >= coresPerExecutor)
           .sortBy(_.coresFree).reverse
+
+        // sanmusee: 将待启动的app和集群中可用的workers传给scheduleExecutorsOnWorkers方法，让scheduleExecutorsOnWorkers方法去做具体的事情
+        // sanmusee: assignedCores数组记录了在每个worker上为当前app分配了多少个core
         val assignedCores = scheduleExecutorsOnWorkers(app, usableWorkers, spreadOutApps)
 
-        // Now that we've decided how many cores to allocate on each worker, let's allocate them
+        // 在那些为当前app分配了core的worker机器上启动executor
         for (pos <- 0 until usableWorkers.length if assignedCores(pos) > 0) {
           allocateWorkerResourceToExecutors(
             app, assignedCores(pos), app.desc.coresPerExecutor, usableWorkers(pos))
@@ -726,25 +755,27 @@ private[deploy] class Master(
   }
 
   /**
-   * Allocate a worker's resources to one or more executors.
-   * @param app the info of the application which the executors belong to
-   * @param assignedCores number of cores on this worker for this application
-   * @param coresPerExecutor number of cores per executor
-   * @param worker the worker info
+   * sanmusee: 在一个指定的worker机器上，为指定的app启动executor，executor的个数取决于二参和三参*
+   * 并更新当前app对象的相应字段，从而让master节点知道这些信息
+   * @param app 当前app的描述信息对象
+   * @param assignedCores 当前worker上为当前app一共分配多少个core，假如worker一共给当前app分配4个core
+   * @param coresPerExecutor worker上的每一个executor包含多少个core，假如每个executor包含1个core
+   * @param worker 当前worker的描述信息对象
    */
   private def allocateWorkerResourceToExecutors(
       app: ApplicationInfo,
       assignedCores: Int,
       coresPerExecutor: Option[Int],
       worker: WorkerInfo): Unit = {
-    // If the number of cores per executor is specified, we divide the cores assigned
-    // to this worker evenly among the executors with no remainder.
-    // Otherwise, we launch a single executor that grabs all the assignedCores on this worker.
+    //sanmusee: 根据assignedCores和coresPerExecutor参数推导出在当前worker上需要为当前app启动多少个executor
     val numExecutors = coresPerExecutor.map { assignedCores / _ }.getOrElse(1)
     val coresToAssign = coresPerExecutor.getOrElse(assignedCores)
     for (i <- 1 to numExecutors) {
+      //sanmusee: 给当前app添加executor，指明添加的executor在哪个worker，以及添加的executor包含的core的数量
       val exec = app.addExecutor(worker, coresToAssign)
+      //sanmusee: 给对应worker发送消息，在worker上启动该executor，worker具体是怎么启动executor的，见Worker.sacla代码
       launchExecutor(worker, exec)
+      //sanmusee: 只要有一个executor启动起来了，就把app的状态置为Running
       app.state = ApplicationState.RUNNING
     }
   }
@@ -754,13 +785,35 @@ private[deploy] class Master(
    * every time a new app joins or resource availability changes.
    */
   private def schedule(): Unit = {
+    // sanmusee: standBy Master不会进行资源调度的
     if (state != RecoveryState.ALIVE) {
       return
     }
     // Drivers take strict precedence over executors
+    /**
+      * sanmusee: Random.shuffle()方法：把一个容器中的元素打乱
+      * 原理： 将参数接收到的数据放到函数栈帧中的一个buf中
+      *       函数内部定义一个swap交换函数
+      *       for循环在每个元素上调用swap，与一个随机位置的元素进行交换
+      *       通过nextInt()方法产生随机位置
+      */
+    // sanmusee: workers是master维护的一个hashSet对象，从hashSet中取出状态是Alive的所有worker，进行打乱
     val shuffledAliveWorkers = Random.shuffle(workers.toSeq.filter(_.state == WorkerState.ALIVE))
+    // sanmusee:  shuffledAliveWorkers为集群中当前所有可用的worker
     val numWorkersAlive = shuffledAliveWorkers.size
     var curPos = 0
+
+    /** sanmusee:
+      * 以下for循环代码是master中对driver的调度机制：
+      * 一下for循环只有在yarn-cluster模式下提交app的时候才会执行
+      * 因为standalone和yarn-client模式都只是在本地启动driver，而不会注册driver，更不会让master来调度driver
+      *
+      * master调度driver的原理：
+      * 双层循环，外层循环遍历所有待启动的driver列表，内层循环遍历所有可用的worker列表
+      * 遍历所有活着的worker， 并且当前driver还没有启动，遍历过程中的worker的剩余内存大于driver需要的内存
+      * 并且worker的CPU数量大于driver需要的CPU数量，就将当前遍历的这个worker启动成driver，并将外层循环的driver从waitingDrivers中移除
+      * 将指针指向下一个worker
+      */
     for (driver <- waitingDrivers.toList) { // iterate over a copy of waitingDrivers
       // We assign workers to each waiting driver in a round-robin fashion. For each driver, we
       // start from the last worker that was assigned a driver, and continue onwards until we have
@@ -771,13 +824,17 @@ private[deploy] class Master(
         val worker = shuffledAliveWorkers(curPos)
         numWorkersVisited += 1
         if (worker.memoryFree >= driver.desc.mem && worker.coresFree >= driver.desc.cores) {
+          // sanmusee: launchDriver()方法很重要，将指定的worker启动成driver
           launchDriver(worker, driver)
           waitingDrivers -= driver
           launched = true
         }
+        // sanmusee: 将指针指向下一个worker
         curPos = (curPos + 1) % numWorkersAlive
       }
     }
+
+    //sanmusee: 调度完yarn-cluster模式下的driver后，调用下面的方法在集群的worker上面调度分配executor
     startExecutorsOnWorkers()
   }
 
@@ -1057,9 +1114,15 @@ private[deploy] class Master(
 
   private def launchDriver(worker: WorkerInfo, driver: DriverInfo) {
     logInfo("Launching driver " + driver.id + " on worker " + worker.id)
+    // sanmusee: 将driver加入到worker的缓存结构中（HashMap），将worker内使用的内存和cpu数量都加上driver所需要的内存和cpu数量
     worker.addDriver(driver)
+    // 同时将worker也加入到driver内部的缓存结构中，互相引用
     driver.worker = Some(worker)
+    // 然后类似以前版本的调用worker的actor，给它发送LanunchDriver消息，让Worker那台机器启动Driver（上面那些操作都是在master中进行的，在master中记录集群的关系）
     worker.endpoint.send(LaunchDriver(driver.id, driver.desc))
+    // worker机器收到上面那条消息后，如何具体把自己启动成driver的代码在Worker.scala中，注释在git版本为worker源码分析中
+    // worker内部应该也有一个actor，接收到LanunchDriver消息后就执行一些事情把自己启动成driver
+
     driver.state = DriverState.RUNNING
   }
 
