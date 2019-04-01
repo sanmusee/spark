@@ -44,6 +44,19 @@ import org.apache.spark.metrics.{MetricsSystem, MetricsSystemInstances}
 import org.apache.spark.rpc._
 import org.apache.spark.util.{SparkUncaughtExceptionHandler, ThreadUtils, Utils}
 
+/**
+  * sanmusee: Worker类中定义receive方法，接收master发来的控制命令，方法通过case语句实现各种各样的命令的回调
+  * @param rpcEnv
+  * @param webUiPort
+  * @param cores
+  * @param memory
+  * @param masterRpcAddresses
+  * @param endpointName
+  * @param workDirPath
+  * @param conf
+  * @param securityMgr
+  * @param externalShuffleServiceSupplier
+  */
 private[deploy] class Worker(
     override val rpcEnv: RpcEnv,
     webUiPort: Int,
@@ -498,6 +511,10 @@ private[deploy] class Worker(
       logInfo(s"Master with url $masterUrl requested this worker to reconnect.")
       registerWithMaster()
 
+    /**
+      * sanmusee:
+      * 收到master的launchExecut命令后，Worker节点开始创建Executor
+      */
     case LaunchExecutor(masterUrl, appId, execId, appDesc, cores_, memory_) =>
       if (masterUrl != activeMasterUrl) {
         logWarning("Invalid Master (" + masterUrl + ") attempted to launch executor.")
@@ -505,7 +522,7 @@ private[deploy] class Worker(
         try {
           logInfo("Asked to launch executor %s/%d for %s".format(appId, execId, appDesc.name))
 
-          // Create the executor's working directory
+          // 创建Executor在这个Worker上的本地工作目录（直接在worker节点的主线程中创建）
           val executorDir = new File(workDir, appId + "/" + execId)
           if (!executorDir.mkdirs()) {
             throw new IOException("Failed to create directory " + executorDir)
@@ -551,8 +568,15 @@ private[deploy] class Worker(
             workerUri,
             conf,
             appLocalDirs, ExecutorState.RUNNING)
+
+          // sanmusee: 将这个executor的ExecutorRunner管理者加入到worker节点的本地缓存executors中
+          // executors缓存中存放的不是一个一个的executor，而是executor对应的ExecutorRunner（manager），因为worker上通过ExecutorRunner去操控每个executor的
           executors(appId + "/" + execId) = manager
+
+          // sanmusee: 通过ExecutorRunner把executor启动起来
           manager.start()
+
+          // sanmusee: 更新这个worker节点的可用资源数的记录
           coresUsed += cores_
           memoryUsed += memory_
           sendToMaster(ExecutorStateChanged(appId, execId, manager.state, None, None))
@@ -585,6 +609,10 @@ private[deploy] class Worker(
         }
       }
 
+    /**
+      * sanmusee: 接收到master的LaunchDriver命令后，创建DriverRunner实例
+      * 调用实例方法start()，在start方法中开启一个java线程
+      */
     case LaunchDriver(driverId, driverDesc) =>
       logInfo(s"Asked to launch driver $driverId")
       val driver = new DriverRunner(
@@ -717,6 +745,14 @@ private[deploy] class Worker(
     }
   }
 
+
+  /**
+    * sanmusee:
+    * Worker收到DriverRunner中的start方法创建的线程发来的DriverStateChanged事件后的处理函数
+    * 在worker中打印相应日志（状态改变的那个driver的Id，状态改变的描述信息，改变成了什么状态），然后把DriverStateChanged事件转发给master节点
+    * @param driverStateChanged 参数是DriverStateChanged类的实例，是对“状态改变”这件事情的抽象封装
+    *                           封装了：谁的状态改变了，改变的信息，改变成了什么状态，共三个字段
+    */
   private[worker] def handleDriverStateChanged(driverStateChanged: DriverStateChanged): Unit = {
     val driverId = driverStateChanged.driverId
     val exception = driverStateChanged.exception
@@ -733,10 +769,18 @@ private[deploy] class Worker(
       case _ =>
         logDebug(s"Driver $driverId changed state to $state")
     }
+    // sanmusee: 转发driverStateChanged事件到master节点，master收到这个信息后，也会在master节点上回收该driver占用的资源的记录
+    // 从而master也知道这个driver在集群中已经移除了
     sendToMaster(driverStateChanged)
+
+    // sanmusee: 将driver从worker节点上记录集群中所有driver的队列中移除
     val driver = drivers.remove(driverId).get
+
+    // sanmusee: 将driver加入到已完成的driver的队列中
     finishedDrivers(driverId) = driver
     trimFinishedDriversIfNecessary()
+
+    // sanmusee: 在worker上回收这个driver在当前worker上占用的资源（实际就是更新一下记录，好让worker自己知道自己还有多少资源可用）
     memoryUsed -= driver.driverDesc.mem
     coresUsed -= driver.driverDesc.cores
   }

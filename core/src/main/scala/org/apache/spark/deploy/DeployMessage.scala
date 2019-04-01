@@ -30,6 +30,10 @@ import org.apache.spark.util.Utils
 private[deploy] sealed trait DeployMessage extends Serializable
 
 /** Contains messages sent between Scheduler endpoint nodes. */
+/**
+  * sanmusee:
+  * 集群中的每一种类型的消息都可以抽象封装成一个class，所有这些class定义在DeployMessages中
+  */
 private[deploy] object DeployMessages {
 
   // Worker to Master
@@ -58,6 +62,14 @@ private[deploy] object DeployMessages {
     assert (port > 0)
   }
 
+  /**
+    * 消息类型之一: 集群中某个app在某个worker上的某个Executor的状态发生改变的消息的抽象封装，这类消息封装了如下字段：
+    * @param appId
+    * @param execId: 不用封装workerId，因为每个节点上都有execId到Executor的Map映射，Executor中记录了自己属于哪个worker
+    * @param state
+    * @param message
+    * @param exitStatus
+    */
   case class ExecutorStateChanged(
       appId: String,
       execId: Int,

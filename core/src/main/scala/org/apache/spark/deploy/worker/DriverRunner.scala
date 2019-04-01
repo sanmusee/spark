@@ -39,6 +39,17 @@ import org.apache.spark.util.{Clock, ShutdownHookManager, SystemClock, Utils}
  * Manages the execution of one driver, including automatically restarting the driver on failure.
  * This is currently only used in standalone cluster deploy mode.
  */
+/**
+  * sanmusee: 管理一个driver的执行，包括driver失败时重启driver，仅用于standalone集群部署
+  * @param conf
+  * @param driverId
+  * @param workDir
+  * @param sparkHome
+  * @param driverDesc
+  * @param worker
+  * @param workerUrl
+  * @param securityManager
+  */
 private[deploy] class DriverRunner(
     conf: SparkConf,
     val driverId: String,
@@ -110,7 +121,7 @@ private[deploy] class DriverRunner(
           }
         }
 
-        // notify worker of final driver state, possible exception
+        // sanmusee: DriverRunner线程向它所属的worker的actor发送一个DriverStateChanged事件
         worker.send(DriverStateChanged(driverId, finalState.get, finalException))
       }
     }.start()
@@ -168,6 +179,13 @@ private[deploy] class DriverRunner(
     localJarFile.getAbsolutePath
   }
 
+  /**
+    * 启动driver的准备工作，包括：
+    * 1、创建driver的工作目录
+    * 2、下载用户上传的jar包，即用户程序app；将用户程序jar包下载到上一步创建的工作目录driverDir中
+    * 3、构建ProcessBuilder
+    * @return
+    */
   private[worker] def prepareAndRunDriver(): Int = {
     val driverDir = createWorkingDirectory()
     val localJarFilename = downloadUserJar(driverDir)
@@ -179,14 +197,17 @@ private[deploy] class DriverRunner(
     }
 
     // TODO: If we add ability to submit multiple jars they should also be added here
+    // sanmusee: buildProcessBuilder构建builder时传入driver的启动命令、需要的内存大小等参数
     val builder = CommandUtils.buildProcessBuilder(driverDesc.command, securityManager,
       driverDesc.mem, sparkHome.getAbsolutePath, substituteVariables)
 
+    //runDriver方法相当于1.0版本的launchDriver方法
     runDriver(builder, driverDir, driverDesc.supervise)
   }
 
   private def runDriver(builder: ProcessBuilder, baseDir: File, supervise: Boolean): Int = {
     builder.directory(baseDir)
+    //sanmusee: initialize() 函数功能：重定向stdout和stderr输出流到文件中
     def initialize(process: Process): Unit = {
       // Redirect stdout and stderr to files
       val stdout = new File(baseDir, "stdout")
